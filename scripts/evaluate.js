@@ -53,6 +53,67 @@ async function downloadPdf(url) {
   return Buffer.from(buffer);
 }
 
+// --- 事前足切りチェック ---
+
+async function preCheck(pdfBase64) {
+  const response = await client.messages.create({
+    model: 'claude-opus-4-6',
+    max_tokens: 512,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: {
+              type: 'base64',
+              media_type: 'application/pdf',
+              data: pdfBase64,
+            },
+          },
+          {
+            type: 'text',
+            text: `このポートフォリオに掲載されている作品の数と、各作品の紹介に使われているページ数を数えてください。
+
+作品とは、独立したデザイン・制作物のことです（住宅、店舗、プロダクト、インスタレーションなど）。
+表紙・目次・プロフィール・自己紹介ページは作品としてカウントしないでください。
+
+以下のJSON形式のみで回答してください（前後に余分なテキストは不要です）：
+{
+  "work_count": <作品の総数（整数）>,
+  "works": [
+    { "title": "<作品名または概要>", "pages": <その作品の紹介ページ数（整数）> }
+  ]
+}`,
+          },
+        ],
+      },
+    ],
+  });
+
+  const text = response.content.find((b) => b.type === 'text')?.text ?? '';
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error(`事前チェックのレスポンスにJSONが含まれていません。レスポンス: ${text}`);
+  }
+  const result = JSON.parse(jsonMatch[0]);
+  console.log('事前チェック結果:', JSON.stringify(result, null, 2));
+
+  const workCount = result.work_count ?? result.works?.length ?? 0;
+  const allSinglePage = Array.isArray(result.works) && result.works.every((w) => w.pages <= 1);
+
+  return { workCount, allSinglePage, detail: result };
+}
+
+async function closeIssue() {
+  await octokit.issues.update({
+    owner,
+    repo,
+    issue_number: ISSUE_NUMBER,
+    state: 'closed',
+  });
+}
+
 // --- Claude API による評価 ---
 
 async function evaluatePortfolio(pdfBase64) {
@@ -316,6 +377,20 @@ async function main() {
   const pdfBase64 = pdfBuffer.toString('base64');
   console.log(`ダウンロード完了: ${pdfBuffer.length} bytes`);
 
+  console.log('事前チェック中...');
+  const { workCount, allSinglePage } = await preCheck(pdfBase64);
+
+  if (workCount <= 3 && allSinglePage) {
+    console.log(`足切り条件に該当: 作品数=${workCount}, 全作品1ページのみ=${allSinglePage}`);
+    await postComment(
+      `## ポートフォリオ評価結果\n\n**結果：不合格**\n\n作品数および各作品の説明ページ数が審査基準を満たしていないため、今回は見送りとさせていただきます。`
+    );
+    await closeIssue();
+    console.log('足切りコメントを投稿しIssueをクローズしました。');
+    return;
+  }
+
+  console.log(`事前チェック通過: 作品数=${workCount}`);
   console.log('Claudeで評価中...');
   const evaluation = await evaluatePortfolio(pdfBase64);
   console.log('評価結果:', JSON.stringify(evaluation, null, 2));
