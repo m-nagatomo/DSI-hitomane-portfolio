@@ -1,0 +1,30 @@
+name: ポートフォリオ自動評価
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  evaluate:
+    if: contains(github.event.issue.body, '.pdf')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 依存パッケージのインストール
+        run: npm install --no-save @anthropic-ai/sdk @octokit/rest
+
+      - name: ポートフォリオ評価の実行
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: node scripts/evaluate.js
